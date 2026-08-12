@@ -9,3 +9,5 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(jkcare)
 
 target_sources(app PRIVATE src/main.c)
+
+add_subdirectory(drivers/sensor/cht8305c)

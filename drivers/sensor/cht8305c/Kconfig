@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config CHT8305C
+	bool "Sensylink CHT8305C temperature and humidity sensor"
+	default y
+	depends on DT_HAS_SENSYLINK_CHT8305C_ENABLED
+	select I2C
+	help
+	  Enable the Sensylink CHT8305C I2C temperature and humidity
+	  sensor driver.

@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
+rsource "drivers/sensor/cht8305c/Kconfig"
+
+source "Kconfig.zephyr"

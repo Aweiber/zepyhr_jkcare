@@ -6,5 +6,23 @@
  * Add application-specific peripherals here later.
  */
 
-/ {
+&i2c0 {
+    status = "okay";
+
+    sht4x: sht4x@44 {
+        compatible = "sensirion,sht4x";
+        reg = <0x44>;
+        repeatability = <2>;
+        status = "okay";
+    };
+
+	/*
+	 * Example out-of-tree sensor driver. CHT8305C defaults to 0x40 when
+	 * AD0 is connected to GND or left floating.
+	 */
+	cht8305c: humidity-sensor@40 {
+		compatible = "sensylink,cht8305c";
+		reg = <0x40>;
+		status = "okay";
+	};
 };
