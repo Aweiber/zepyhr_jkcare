@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_JKCARE_APOLLO4P_BLUE
+	select SOC_APOLLO4P_BLUE

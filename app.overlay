@@ -1,0 +1,10 @@
+/*
+ * jkcare application devicetree overlay.
+ *
+ * UART0 and I2C0 are board-level hardware and are defined in
+ * boards/ambiq/jkcare_apollo4p_blue/jkcare_apollo4p_blue.dts.
+ * Add application-specific peripherals here later.
+ */
+
+/ {
+};

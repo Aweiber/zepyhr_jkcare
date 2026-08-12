@@ -1,0 +1,6 @@
+board:
+  name: jkcare_apollo4p_blue
+  full_name: JKCare Apollo4 Plus Blue Board
+  vendor: ambiq
+  socs:
+    - name: apollo4p_blue

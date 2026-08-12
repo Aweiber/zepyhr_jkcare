@@ -1,0 +1,48 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Initial pin assignment copied from the Apollo4 Blue Plus KXR EVB.
+ * Replace these pins with the connections from the JKCare schematic.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/ambiq-apollo4-pinctrl.h>
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			/* UART0 TX: GPIO 12 */
+			pinmux = <UART0TX_P12>;
+		};
+
+		group2 {
+			/* UART0 RX: GPIO 47 */
+			pinmux = <UART0RX_P47>;
+			input-enable;
+		};
+	};
+
+	i2c0_default: i2c0_default {
+		group1 {
+			/* IOM0 I2C SCL: GPIO 5, SDA: GPIO 6 */
+			pinmux = <M0SCL_P5>, <M0SDAWIR3_P6>;
+			drive-open-drain;
+			drive-strength = "0.5";
+			bias-pull-up;
+		};
+	};
+
+	/* Required Apollo4 Plus Blue clock pins; verify against the schematic. */
+	xo32m_default: xo32m_default {
+		group1 {
+			pinmux = <CLKOUT_32M_P46>;
+			drive-strength = "0.1";
+		};
+	};
+
+	xo32k_default: xo32k_default {
+		group1 {
+			pinmux = <XT32KHZ_P4>;
+			drive-strength = "0.1";
+		};
+	};
+};

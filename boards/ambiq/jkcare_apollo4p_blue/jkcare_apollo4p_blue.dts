@@ -1,0 +1,66 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <ambiq/ambiq_apollo4p_blue.dtsi>
+#include "jkcare_apollo4p_blue-pinctrl.dtsi"
+
+/ {
+	model = "JKCare Apollo4 Plus Blue board";
+	compatible = "jkcare,apollo4p-blue";
+
+	chosen {
+		zephyr,itcm = &tcm;
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,flash-controller = &flash;
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+	};
+};
+
+/* UART0 is the console and logging output. */
+&uart0 {
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/* Apollo4 IOM0 is configured in I2C mode as i2c0. */
+&iom0 {
+	i2c0: i2c {
+		pinctrl-0 = <&i2c0_default>;
+		pinctrl-names = "default";
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+		scl-gpios = <&gpio0_31 5 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		sda-gpios = <&gpio0_31 6 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		status = "okay";
+	};
+};
+
+&gpio0_31 {
+	status = "okay";
+};
+
+&gpio32_63 {
+	status = "okay";
+};
+
+/* Required system timer clock source for the Zephyr kernel tick. */
+&stimer0 {
+	clk-source = <3>;
+};
+
+&xo32m {
+	pinctrl-0 = <&xo32m_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&xo32k {
+	pinctrl-0 = <&xo32k_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
