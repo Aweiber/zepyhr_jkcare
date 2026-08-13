@@ -3,12 +3,15 @@
  */
 
 #include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(jkcare, LOG_LEVEL_INF);
+
+#define USER_NODE DT_PATH(zephyr_user)
 
 #if !DT_NODE_HAS_STATUS(DT_NODELABEL(i2c0), okay)
 #error "The selected board does not define an enabled i2c0 node"
@@ -19,12 +22,92 @@ LOG_MODULE_REGISTER(jkcare, LOG_LEVEL_INF);
 #endif
 
 #if !DT_NODE_HAS_STATUS(DT_NODELABEL(cht8305c), okay)
-#error "app.overlay does not define an enabled sht4x node"
+#error "app.overlay does not define an enabled cht8305c node"
+#endif
+
+#if !DT_NODE_EXISTS(USER_NODE)
+#error "app.overlay does not define /zephyr,user"
 #endif
 
 static const struct device *const i2c0 = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 static const struct device *const sht4x = DEVICE_DT_GET(DT_NODELABEL(sht4x));
 static const struct device *const cht8305c = DEVICE_DT_GET(DT_NODELABEL(cht8305c));
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(USER_NODE, led_gpios);
+static const struct gpio_dt_spec touch = GPIO_DT_SPEC_GET(USER_NODE, touch_gpios);
+static struct gpio_callback touch_callback;
+
+static void touch_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	int ret = gpio_pin_toggle_dt(&led);
+
+	if (ret < 0) {
+		LOG_ERR("Failed to toggle LED: %d", ret);
+		return;
+	}
+
+	LOG_INF("Touch rising edge, LED=%d", gpio_pin_get_dt(&led));
+}
+
+K_WORK_DEFINE(touch_work, touch_work_handler);
+
+static void touch_interrupt_handler(const struct device *port,
+				    struct gpio_callback *callback,
+				    gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+
+	/* Keep the ISR short; GPIO access and logging run on the system workqueue. */
+	k_work_submit(&touch_work);
+}
+
+static int gpio_init(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&led)) {
+		LOG_ERR("LED GPIO controller is not ready");
+		return -ENODEV;
+	}
+
+	if (!gpio_is_ready_dt(&touch)) {
+		LOG_ERR("Touch GPIO controller is not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure LED GPIO: %d", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_configure_dt(&touch, GPIO_INPUT);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure touch GPIO: %d", ret);
+		return ret;
+	}
+
+	gpio_init_callback(&touch_callback, touch_interrupt_handler, BIT(touch.pin));
+
+	ret = gpio_add_callback(touch.port, &touch_callback);
+	if (ret < 0) {
+		LOG_ERR("Failed to add touch callback: %d", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(&touch, GPIO_INT_EDGE_RISING);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable touch rising-edge interrupt: %d", ret);
+		gpio_remove_callback(touch.port, &touch_callback);
+		return ret;
+	}
+
+	LOG_INF("LED GPIO%u and touch GPIO%u are ready", led.pin, touch.pin);
+	return 0;
+}
 
 static void log_milli_value(const char *name, int64_t milli, const char *unit)
 {
@@ -37,6 +120,10 @@ static void log_milli_value(const char *name, int64_t milli, const char *unit)
 
 int main(void)
 {
+	if (gpio_init() < 0) {
+		return 0;
+	}
+
 	if (!device_is_ready(i2c0)) {
 		LOG_ERR("I2C0 is not ready");
 		return 0;

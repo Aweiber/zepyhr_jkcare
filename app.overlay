@@ -6,6 +6,19 @@
  * Add application-specific peripherals here later.
  */
 
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	/*
+	 * Temporary GPIO assignments; update these two pin numbers according
+	 * to the JKCare schematic.
+	 */
+	zephyr,user {
+		led-gpios = <&gpio0_31 7 GPIO_ACTIVE_HIGH>;
+		touch-gpios = <&gpio0_31 8 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+	};
+};
+
 &i2c0 {
     status = "okay";
 

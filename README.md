@@ -919,6 +919,8 @@ Get-ChildItem .\jkcare\build -Recurse -Filter "*cht8305c*.obj"
 | UART0 RX | GPIO 47 |
 | I2C0 SCL | GPIO 5 |
 | I2C0 SDA | GPIO 6 |
+| LED（高电平点亮） | GPIO 7 |
+| Touch（下拉、上升沿中断） | GPIO 8 |
 | 32 MHz clock output | GPIO 46 |
 | 32 kHz clock | GPIO 4 |
 
@@ -930,3 +932,14 @@ boards/ambiq/jkcare_apollo4p_blue/jkcare_apollo4p_blue.dts
 ```
 
 尤其需要保证 pinmux 编码、I2C GPIO 描述、外部上拉、UART 电平和晶振连接与实际 PCB 一致。
+
+当前应用级 GPIO 定义位于 `app.overlay` 的 `/zephyr,user` 节点：
+
+```dts
+zephyr,user {
+    led-gpios = <&gpio0_31 7 GPIO_ACTIVE_HIGH>;
+    touch-gpios = <&gpio0_31 8 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+};
+```
+
+启动时 `gpio_init()` 将 LED 配置为低电平初始状态，将 touch 配置为输入并注册物理上升沿中断。中断服务函数只提交系统 work；work handler 负责翻转 LED 并输出日志，避免在中断上下文中执行较重操作。GPIO 7 和 GPIO 8 是未取得最终原理图时的临时分配，必须按实际 PCB 修改。
