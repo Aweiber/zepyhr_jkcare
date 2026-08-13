@@ -1,0 +1,1 @@
+"mcuboot":"E:/liaoguangwei/code/zephyr_zip/bootloader/mcuboot":"E:/liaoguangwei/code/zephyr_zip/bootloader/mcuboot/boot/zephyr/sysbuild"

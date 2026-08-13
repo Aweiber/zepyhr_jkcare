@@ -9,6 +9,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "jkcare_plugin_manager.h"
+
 LOG_MODULE_REGISTER(jkcare, LOG_LEVEL_INF);
 
 #define USER_NODE DT_PATH(zephyr_user)
@@ -142,6 +144,17 @@ int main(void)
 	LOG_INF("UART0 console is running at 115200 baud");
 	LOG_INF("I2C0 is ready");
 	LOG_INF("SHT4x is ready");
+
+	/*
+	 * Discover every plugin image known by the loader, load its ELF,
+	 * resolve the common jkcare_plugin symbol, then call init() and start().
+	 * PPG and ECG start their own managed business threads, so main does not
+	 * call a process() function for them.
+	 */
+	int plugin_ret = jkcare_plugin_manager_load_all();
+	if (plugin_ret < 0) {
+		LOG_ERR("One or more dynamic plugins failed to start: %d", plugin_ret);
+	}
     
 	while (true) {
 		struct sensor_value temperature;

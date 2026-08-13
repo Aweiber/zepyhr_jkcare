@@ -1,0 +1,5 @@
+west:
+  command: E:\liaoguangwei\code\zephyr_zip\.venv\Scripts\west build -d .\jkcare\build
+    -t ppg_plugin
+  topdir: E:\liaoguangwei\code\zephyr_zip
+  version: 1.5.0
