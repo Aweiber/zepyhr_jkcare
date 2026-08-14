@@ -16,11 +16,11 @@ static void ecg_thread(void *context)
 	(void)context;
 
 	while (running) {
-		host->print("ECG", " business thread is running");
+		host->print("ECG", "  business thread is running");
 		host->sleep_ms(1500);
 	}
 
-	host->print("ECG", " business thread stopped");
+	host->print("ECG", "  business thread stopped");
 }
 
 static int ecg_init(const struct jkcare_host_api *api)

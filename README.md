@@ -943,3 +943,353 @@ zephyr,user {
 ```
 
 启动时 `gpio_init()` 将 LED 配置为低电平初始状态，将 touch 配置为输入并注册物理上升沿中断。中断服务函数只提交系统 work；work handler 负责翻转 LED 并输出日志，避免在中断上下文中执行较重操作。GPIO 7 和 GPIO 8 是未取得最终原理图时的临时分配，必须按实际 PCB 修改。
+
+## 19. 本地构建、静态嵌入与运行时动态加载 LLEXT
+
+当前 PPG、ECG 插件采用以下验证方案：
+
+```text
+插件源码
+  → 在JKCare主工程中编译成独立.llext ELF
+  → 构建时转换成.inc十六进制文本
+  → 静态嵌入zephyr.elf
+  → MCU启动时由llext_load()动态解析、重定位和加载
+  → 查询统一插件API并启动插件线程
+```
+
+这种方式应准确称为：
+
+```text
+部署时静态打包，运行时动态加载
+```
+
+它适合验证 LLEXT、插件 ABI、符号查找和线程生命周期。因为插件仍被打包在主固件中，所以更新插件后需要重新链接并烧录主固件；它还不是外部 Flash 中插件的独立升级方案。
+
+### 19.1 插件目录和公共接口
+
+```text
+jkcare/
+├── include/
+│   ├── jkcare_plugin.h
+│   └── jkcare_plugin_manager.h
+├── plugins/
+│   ├── ppg/ppg_plugin.c
+│   └── ecg/ecg_plugin.c
+└── src/
+    ├── main.c
+    └── plugin_manager.c
+```
+
+主固件和插件共同使用 `include/jkcare_plugin.h`。所有插件必须导出同名对象：
+
+```c
+const struct jkcare_plugin_api jkcare_plugin = {
+    .abi_version = JKCARE_PLUGIN_ABI_VERSION,
+    .struct_size = sizeof(struct jkcare_plugin_api),
+    .name = "PPG business",
+    .init = ppg_init,
+    .start = ppg_start,
+    .stop = ppg_stop,
+    .deinit = ppg_deinit,
+};
+
+EXPORT_SYMBOL(jkcare_plugin);
+```
+
+PPG 和 ECG 可以导出相同的 `jkcare_plugin`，因为它们位于两个独立的 ELF 文件中，不会在主固件静态链接阶段发生同名符号冲突。
+
+### 19.2 CMake 如何生成插件目标
+
+根 `CMakeLists.txt` 当前包含：
+
+```cmake
+foreach(plugin_name ppg ecg)
+    set(plugin_binary
+        ${PROJECT_BINARY_DIR}/llext/${plugin_name}_plugin.llext
+    )
+    set(plugin_include
+        ${ZEPHYR_BINARY_DIR}/include/generated/${plugin_name}_plugin.inc
+    )
+
+    add_llext_target(${plugin_name}_plugin
+        OUTPUT ${plugin_binary}
+        SOURCES plugins/${plugin_name}/${plugin_name}_plugin.c
+    )
+
+    generate_inc_file_for_target(
+        app
+        ${plugin_binary}
+        ${plugin_include}
+    )
+endforeach()
+```
+
+循环展开后创建两个构建目标：
+
+```text
+ppg_plugin
+ecg_plugin
+```
+
+目标名来自 `add_llext_target()` 的第一个参数，不是 west 根据文件名自动推断的。可用以下命令确认：
+
+```powershell
+west build -d build -t help |
+    Select-String "ppg_plugin|ecg_plugin"
+```
+
+### 19.3 首次配置与完整构建
+
+新建或清理构建目录后必须指定开发板：
+
+```powershell
+cd E:\liaoguangwei\code\zephyr_zip\jkcare
+
+west build -p always `
+    -b jkcare_apollo4p_blue `
+    -d build `
+    .
+```
+
+`-p always` 会清除 `CMakeCache.txt`。如果只执行：
+
+```powershell
+west build -p always -d build -t ppg_plugin
+```
+
+缓存中的 BOARD 会被删除，而命令又没有 `-b`，因此会报 `BOARD is not being defined`。首次配置或使用 `-p always` 时必须同时指定：
+
+```powershell
+-b jkcare_apollo4p_blue
+```
+
+### 19.4 单独构建某个插件
+
+构建目录已经使用正确开发板配置后，单独构建 PPG：
+
+```powershell
+west build -d build -t ppg_plugin
+```
+
+单独构建 ECG：
+
+```powershell
+west build -d build -t ecg_plugin
+```
+
+生成文件：
+
+```text
+build/llext/ppg_plugin.llext
+build/llext/ppg_plugin_debug.elf
+build/llext/ecg_plugin.llext
+build/llext/ecg_plugin_debug.elf
+```
+
+其中：
+
+| 文件 | 用途 |
+|---|---|
+| `*_plugin.llext` | 实际由 LLEXT loader 加载的插件 ELF |
+| `*_plugin_debug.elf` | 保留更多符号，用于 GDB、反汇编和定位问题 |
+| `*.obj` | 编译/部分链接过程中的中间产物 |
+
+如果显示：
+
+```text
+ninja: no work to do.
+```
+
+表示源码、公共头文件和编译配置没有变化，现有 `.llext` 已经是最新产物，并不是错误。
+
+### 19.5 `.inc` 文件是什么
+
+`.inc` 是构建系统生成的 C 文本片段，不是另一个插件格式。它把 `.llext` 的所有二进制字节转换为十六进制常量：
+
+```c
+0x7f, 0x45, 0x4c, 0x46, 0x01, 0x01, 0x01, 0x00,
+/* 后续是完整ELF的字节 */
+```
+
+开头的 `0x7f, 'E', 'L', 'F'` 是 ELF magic。插件管理器通过预处理包含它：
+
+```c
+static uint8_t ppg_plugin_image[] = {
+#include "ppg_plugin.inc"
+};
+
+static uint8_t ecg_plugin_image[] = {
+#include "ecg_plugin.inc"
+};
+```
+
+预处理后相当于：
+
+```c
+static uint8_t ppg_plugin_image[] = {
+    0x7f, 0x45, 0x4c, 0x46,
+    /* ... */
+};
+```
+
+生成位置：
+
+```text
+build/zephyr/include/generated/ppg_plugin.inc
+build/zephyr/include/generated/ecg_plugin.inc
+```
+
+单独执行：
+
+```powershell
+west build -d build -t ecg_plugin
+```
+
+只要求生成 `.obj` 和 `.llext`，不会要求生成 `.inc`。这是因为 `generate_inc_file_for_target(app ...)` 把 `.inc` 绑定到了主固件 `app` 目标。要生成 `.inc` 并重新嵌入主固件，应继续执行：
+
+```powershell
+west build -d build
+```
+
+检查生成文件：
+
+```powershell
+Get-ChildItem .\build `
+    -Recurse `
+    -Filter "*plugin.inc"
+```
+
+### 19.6 当前运行时加载过程
+
+`plugin_manager.c` 建立镜像表：
+
+```c
+static const struct plugin_image plugin_images[] = {
+    { "ppg", ppg_plugin_image, sizeof(ppg_plugin_image) },
+    { "ecg", ecg_plugin_image, sizeof(ecg_plugin_image) },
+};
+```
+
+`main()` 调用：
+
+```c
+jkcare_plugin_manager_load_all();
+```
+
+插件管理器对每个镜像执行：
+
+```text
+LLEXT_BUF_LOADER(image->data, image->size)
+  → llext_load()
+  → 查询导出符号jkcare_plugin
+  → 检查abi_version和struct_size
+  → plugin->init(&host_api)
+  → plugin->start()
+  → 插件通过Host API申请业务线程
+```
+
+核心代码近似为：
+
+```c
+struct llext_buf_loader buffer_loader =
+    LLEXT_BUF_LOADER(image->data, image->size);
+
+ret = llext_load(
+    &buffer_loader.loader,
+    image->name,
+    &plugin->extension,
+    &load_param
+);
+
+plugin->api = llext_find_sym(
+    &plugin->extension->exp_tab,
+    "jkcare_plugin"
+);
+
+plugin->api->init(&host_api);
+plugin->api->start();
+```
+
+`start()` 创建线程后立即返回，PPG/ECG 业务线程随后独立运行；`main()` 不需要循环调用插件 `process()`。
+
+### 19.7 插件线程和安全卸载
+
+当前插件通过 Host API 请求主固件创建线程：
+
+```c
+host->thread_create(
+    &worker,
+    "ppg_plugin",
+    ppg_thread,
+    NULL,
+    2048,
+    5
+);
+```
+
+主固件管理线程控制块和线程栈，插件管理线程入口及业务状态。卸载必须按以下顺序：
+
+```text
+plugin->stop()
+  → running=false
+  → 唤醒或等待业务线程退出
+  → host->thread_join()
+  → plugin->deinit()
+  → llext_unload()
+```
+
+禁止在线程、timer、work、ISR 回调或函数指针仍引用插件代码时调用 `llext_unload()`，否则下一次执行会跳入已经释放的地址并触发 Fault。
+
+### 19.8 修改插件后的完整验证流程
+
+例如修改 `plugins/ppg/ppg_plugin.c` 后：
+
+```powershell
+# 只重新生成PPG的.llext
+west build -d build -t ppg_plugin
+
+# 重新生成ppg_plugin.inc并链接主固件
+west build -d build
+
+# 烧录包含新插件的主固件
+west flash -d build
+```
+
+确认产物：
+
+```powershell
+Get-ChildItem .\build\llext\*.llext |
+    Select-Object Name, Length, LastWriteTime
+
+Get-ChildItem .\build\zephyr\include\generated\*plugin.inc |
+    Select-Object Name, Length, LastWriteTime
+```
+
+### 19.9 当前方案与外部 Flash 方案的边界
+
+当前方案：
+
+```text
+.llext → .inc → zephyr.elf → west flash
+```
+
+外部 Flash/文件系统方案：
+
+```text
+.llext → 单独写入/lfs/plugins/ → LLEXT_FS_LOADER
+```
+
+切换到外部文件系统后，应删除：
+
+```cmake
+generate_inc_file_for_target(...)
+```
+
+以及：
+
+```c
+#include "ppg_plugin.inc"
+#include "ecg_plugin.inc"
+```
+
+插件管理器改为扫描 `/lfs/plugins`，对所有 `.llext` 文件执行统一的加载、ABI校验和注册流程。外部 Flash 方案只需要发布 `.llext`，不需要 `.inc`，也不需要把插件源码列在主固件 CMake 中。
