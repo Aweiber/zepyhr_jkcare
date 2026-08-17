@@ -1,2 +1,3 @@
 /build/
 /.venv/
+/plugins/*/build-standalone/

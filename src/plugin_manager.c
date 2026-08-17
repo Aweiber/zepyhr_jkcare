@@ -4,11 +4,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
+#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
-#include <zephyr/llext/buf_loader.h>
+#include <zephyr/llext/fs_loader.h>
 #include <zephyr/llext/llext.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 #include "jkcare_plugin.h"
@@ -16,29 +19,12 @@
 
 LOG_MODULE_REGISTER(jkcare_plugin_manager, LOG_LEVEL_INF);
 
-#define MAX_PLUGINS             2
-#define MAX_PLUGIN_THREADS      2
+#define PLUGIN_DIRECTORY         "/llext/business"
+#define PLUGIN_FILE_SUFFIX       ".llext"
+#define PLUGIN_PATH_MAX          192
+#define MAX_PLUGINS              8
+#define MAX_PLUGIN_THREADS       8
 #define PLUGIN_THREAD_STACK_SIZE 2048
-
-/* These byte arrays are generated from the two independent LLEXT ELF files. */
-static uint8_t ppg_plugin_image[] = {
-#include "ppg_plugin.inc"
-};
-
-static uint8_t ecg_plugin_image[] = {
-#include "ecg_plugin.inc"
-};
-
-struct plugin_image {
-	const char *name;
-	uint8_t *data;
-	size_t size;
-};
-
-static const struct plugin_image plugin_images[] = {
-	{ "ppg", ppg_plugin_image, sizeof(ppg_plugin_image) },
-	{ "ecg", ecg_plugin_image, sizeof(ecg_plugin_image) },
-};
 
 struct loaded_plugin {
 	struct llext *extension;
@@ -149,12 +135,48 @@ static const struct jkcare_host_api host_api = {
 	.thread_join = host_thread_join,
 };
 
-static int load_and_start_plugin(const struct plugin_image *image)
+static bool is_plugin_file(const struct fs_dirent *entry)
 {
-	struct llext_buf_loader buffer_loader =
-		LLEXT_BUF_LOADER(image->data, image->size);
+	size_t name_length;
+	size_t suffix_length = strlen(PLUGIN_FILE_SUFFIX);
+
+	if (entry->type != FS_DIR_ENTRY_FILE) {
+		return false;
+	}
+
+	name_length = strlen(entry->name);
+	return name_length > suffix_length &&
+	       strcmp(entry->name + name_length - suffix_length,
+		      PLUGIN_FILE_SUFFIX) == 0;
+}
+
+static int plugin_name_from_filename(const char *filename, char *name,
+				     size_t name_size)
+{
+	size_t filename_length = strlen(filename);
+	size_t suffix_length = strlen(PLUGIN_FILE_SUFFIX);
+	size_t name_length;
+
+	if (filename_length <= suffix_length || name_size == 0) {
+		return -EINVAL;
+	}
+
+	name_length = filename_length - suffix_length;
+	if (name_length >= name_size) {
+		return -ENAMETOOLONG;
+	}
+
+	memcpy(name, filename, name_length);
+	name[name_length] = '\0';
+	return 0;
+}
+
+static int load_and_start_plugin(const char *path, const char *filename)
+{
+	struct llext_fs_loader fs_loader = LLEXT_FS_LOADER(path);
 	struct llext_load_param load_param = LLEXT_LOAD_PARAM_DEFAULT;
 	struct loaded_plugin *plugin;
+	char plugin_name[LLEXT_MAX_NAME_LEN + 1];
 	int ret;
 
 	if (loaded_plugin_count >= ARRAY_SIZE(loaded_plugins)) {
@@ -163,38 +185,45 @@ static int load_and_start_plugin(const struct plugin_image *image)
 
 	plugin = &loaded_plugins[loaded_plugin_count];
 
-	ret = llext_load(&buffer_loader.loader, image->name,
+	ret = plugin_name_from_filename(filename, plugin_name,
+					sizeof(plugin_name));
+	if (ret < 0) {
+		LOG_ERR("Invalid plugin filename %s: %d", filename, ret);
+		return ret;
+	}
+
+	ret = llext_load(&fs_loader.loader, plugin_name,
 			 &plugin->extension, &load_param);
 	if (ret < 0) {
-		LOG_ERR("Failed to load %s plugin: %d", image->name, ret);
+		LOG_ERR("Failed to load plugin %s: %d", path, ret);
 		return ret;
 	}
 
 	plugin->api = llext_find_sym(&plugin->extension->exp_tab,
 				     "jkcare_plugin");
 	if (plugin->api == NULL) {
-		LOG_ERR("Plugin %s does not export jkcare_plugin", image->name);
+		LOG_ERR("Plugin %s does not export jkcare_plugin", path);
 		(void)llext_unload(&plugin->extension);
 		return -ENOENT;
 	}
 
 	if (plugin->api->abi_version != JKCARE_PLUGIN_ABI_VERSION ||
 	    plugin->api->struct_size != sizeof(struct jkcare_plugin_api)) {
-		LOG_ERR("Plugin %s has an incompatible ABI", image->name);
+		LOG_ERR("Plugin %s has an incompatible ABI", path);
 		(void)llext_unload(&plugin->extension);
 		return -EPROTO;
 	}
 
 	ret = plugin->api->init(&host_api);
 	if (ret < 0) {
-		LOG_ERR("Plugin %s init failed: %d", image->name, ret);
+		LOG_ERR("Plugin %s init failed: %d", path, ret);
 		(void)llext_unload(&plugin->extension);
 		return ret;
 	}
 
 	ret = plugin->api->start();
 	if (ret < 0) {
-		LOG_ERR("Plugin %s start failed: %d", image->name, ret);
+		LOG_ERR("Plugin %s start failed: %d", path, ret);
 		plugin->api->deinit();
 		(void)llext_unload(&plugin->extension);
 		return ret;
@@ -208,16 +237,60 @@ static int load_and_start_plugin(const struct plugin_image *image)
 
 int jkcare_plugin_manager_load_all(void)
 {
+	struct fs_dir_t directory;
+	struct fs_dirent entry;
+	char path[PLUGIN_PATH_MAX];
 	int first_error = 0;
+	int ret;
 
-	for (size_t i = 0; i < ARRAY_SIZE(plugin_images); i++) {
-		int ret = load_and_start_plugin(&plugin_images[i]);
+	fs_dir_t_init(&directory);
+	ret = fs_opendir(&directory, PLUGIN_DIRECTORY);
+	if (ret < 0) {
+		LOG_ERR("Cannot open plugin directory %s: %d; mount the filesystem first",
+			PLUGIN_DIRECTORY, ret);
+		return ret;
+	}
+
+	LOG_INF("Scanning plugin directory: %s", PLUGIN_DIRECTORY);
+
+	while (true) {
+		ret = fs_readdir(&directory, &entry);
+		if (ret < 0) {
+			LOG_ERR("Failed to read plugin directory: %d", ret);
+			if (first_error == 0) {
+				first_error = ret;
+			}
+			break;
+		}
+
+		if (entry.name[0] == '\0') {
+			break;
+		}
+
+		if (!is_plugin_file(&entry)) {
+			continue;
+		}
+
+		ret = snprintk(path, sizeof(path), "%s/%s",
+			       PLUGIN_DIRECTORY, entry.name);
+		if (ret < 0 || ret >= sizeof(path)) {
+			LOG_ERR("Plugin path is too long: %s", entry.name);
+			if (first_error == 0) {
+				first_error = -ENAMETOOLONG;
+			}
+			continue;
+		}
+
+		ret = load_and_start_plugin(path, entry.name);
 
 		if (ret < 0 && first_error == 0) {
 			first_error = ret;
 		}
 	}
 
+	(void)fs_closedir(&directory);
+	LOG_INF("Started %u plugin(s) from %s",
+		(unsigned int)loaded_plugin_count, PLUGIN_DIRECTORY);
 	return first_error;
 }
 

@@ -944,9 +944,9 @@ zephyr,user {
 
 启动时 `gpio_init()` 将 LED 配置为低电平初始状态，将 touch 配置为输入并注册物理上升沿中断。中断服务函数只提交系统 work；work handler 负责翻转 LED 并输出日志，避免在中断上下文中执行较重操作。GPIO 7 和 GPIO 8 是未取得最终原理图时的临时分配，必须按实际 PCB 修改。
 
-## 19. 本地构建、静态嵌入与运行时动态加载 LLEXT
+## 19. 第一种 LLEXT 方式：静态嵌入（历史验证方案）
 
-当前 PPG、ECG 插件采用以下验证方案：
+本项目早期使用以下验证方案，当前代码已经切换到第 20 章的文件系统加载方式。本章保留用于解释 `.inc` 和两种方案的区别：
 
 ```text
 插件源码
@@ -1293,3 +1293,639 @@ generate_inc_file_for_target(...)
 ```
 
 插件管理器改为扫描 `/lfs/plugins`，对所有 `.llext` 文件执行统一的加载、ABI校验和注册流程。外部 Flash 方案只需要发布 `.llext`，不需要 `.inc`，也不需要把插件源码列在主固件 CMake 中。
+
+## 20. 当前方案：插件动态编译与文件系统动态加载
+
+这里的“动态”包含两个彼此独立的阶段：
+
+- **动态编译/独立发布**：PPG、ECG 等插件不参与主固件链接，使用主固件生成的 LLEXT EDK 单独编译成 `.llext`；更新插件时不需要重新链接主固件。
+- **动态加载/运行**：MCU 启动后，主固件扫描文件系统，调用 `llext_load()` 将插件的可加载段复制并重定位到可执行 RAM，然后查询统一 ABI 并调用插件的 `init()`、`start()`。
+
+完整链路如下：
+
+```text
+主固件配置和编译
+  → 生成llext-edk.tar.xz
+  → 用EDK独立编译ppg_plugin.llext/ecg_plugin.llext
+  → 将.llext写入文件系统/llext/business
+  → MCU初始化存储并挂载/llext
+  → 主固件扫描所有.llext文件
+  → llext_load()分配RAM、复制section、解析符号并重定位
+  → 查找导出对象jkcare_plugin
+  → ABI校验
+  → init(&host_api)
+  → start()
+  → 插件业务线程独立运行
+```
+
+因此，`.llext` 文件长期保存在 Flash/文件系统，运行期间使用的是已经加载到 RAM 的代码和数据。普通文件系统不要求外部 Flash 支持 XIP，也不能直接把文件系统中的字节当作指令执行。
+
+当前代码假设系统已经将某个文件系统挂载在：
+
+```text
+/llext
+```
+
+业务插件存放目录：
+
+```text
+/llext/business/
+├── ppg_plugin.llext
+├── ecg_plugin.llext
+└── 后续其他业务插件.llext
+```
+
+`jkcare_plugin_manager_load_all()` 不再包含固定的 PPG/ECG 镜像，而是扫描该目录中的所有 `.llext` 文件。新增插件不需要修改主固件 CMake或镜像数组，只要插件遵守 `jkcare_plugin.h` ABI并被写入该目录即可。
+
+### 20.1 主固件与文件系统的职责
+
+当前代码只实现插件目录扫描和文件加载，不负责初始化具体 Flash 芯片、创建分区、格式化或挂载文件系统。实际产品必须在调用插件管理器前完成：
+
+```text
+初始化内部Flash/外部SPI NOR
+  → 找到文件系统分区
+  → 挂载LittleFS等文件系统到/llext
+  → 确保/llext/business目录存在
+  → jkcare_plugin_manager_load_all()
+```
+
+如果文件系统没有挂载，启动日志会出现：
+
+```text
+Cannot open plugin directory /llext/business: ...; mount the filesystem first
+```
+
+`prj.conf` 当前启用通用文件系统和 LLEXT：
+
+```conf
+CONFIG_FILE_SYSTEM=y
+CONFIG_LLEXT=y
+CONFIG_LLEXT_HEAP_SIZE=64
+CONFIG_LLEXT_TYPE_ELF_RELOCATABLE=y
+```
+
+实际使用 LittleFS 时还需要根据存储硬件增加类似配置：
+
+```conf
+CONFIG_FLASH=y
+CONFIG_FLASH_MAP=y
+CONFIG_FILE_SYSTEM_LITTLEFS=y
+```
+
+具体 Flash、分区和挂载配置必须根据实际硬件确定，不能仅打开 Kconfig 就自动得到 `/llext`。
+
+### 20.2 主固件不再编译插件
+
+主固件根 `CMakeLists.txt` 当前只编译应用和插件管理器：
+
+```cmake
+zephyr_include_directories(include)
+
+target_sources(app PRIVATE
+    src/main.c
+    src/plugin_manager.c
+)
+```
+
+其中已经删除：
+
+```cmake
+add_llext_target(...)
+generate_inc_file_for_target(...)
+```
+
+因此完整构建主固件不会生成或嵌入 PPG/ECG，也不会生成 `ppg_plugin.inc`、`ecg_plugin.inc`：
+
+```powershell
+west build -p always `
+    -b jkcare_apollo4p_blue `
+    -d build `
+    .
+```
+
+主固件产物与插件产物相互独立：
+
+```text
+主固件：build/zephyr/zephyr.elf、zephyr.bin、zephyr.hex
+PPG插件：plugins/ppg/build-standalone/ppg_plugin.llext
+ECG插件：plugins/ecg/build-standalone/ecg_plugin.llext
+```
+
+### 20.3 插件目录扫描
+
+插件管理器中的目录配置：
+
+```c
+#define PLUGIN_DIRECTORY   "/llext/business"
+#define PLUGIN_FILE_SUFFIX ".llext"
+```
+
+扫描过程：
+
+```text
+fs_opendir("/llext/business")
+  → fs_readdir()
+  → 忽略子目录和非.llext文件
+  → 拼接完整文件路径
+  → LLEXT_FS_LOADER(path)
+  → llext_load()
+```
+
+核心逻辑近似为：
+
+```c
+while (fs_readdir(&directory, &entry) == 0 &&
+       entry.name[0] != '\0') {
+    if (!is_plugin_file(&entry)) {
+        continue;
+    }
+
+    snprintk(path, sizeof(path), "%s/%s",
+             PLUGIN_DIRECTORY, entry.name);
+
+    load_and_start_plugin(path, entry.name);
+}
+```
+
+文件名去掉 `.llext` 后作为 LLEXT实例名：
+
+```text
+ppg_plugin.llext → ppg_plugin
+ecg_plugin.llext → ecg_plugin
+```
+
+文件名必须能放入 `LLEXT_MAX_NAME_LEN + 1`。不同插件应使用不同文件名，避免 LLEXT按相同名称复用已加载实例。
+
+### 20.4 从文件读取后加载到哪里
+
+`LLEXT_FS_LOADER` 使用 `LLEXT_STORAGE_TEMPORARY`。文件系统只负责长期保存 ELF；加载时 Zephyr把运行所需区域复制到 LLEXT RAM heap：
+
+```text
+/llext/business/ppg_plugin.llext
+  → 读取ELF header和section
+  → 在LLEXT heap分配.text/.rodata/.data/.bss
+  → 复制section并清零.bss
+  → 处理符号和重定位
+  → 刷新数据/指令缓存
+  → 关闭插件文件
+  → CPU执行RAM中的.text
+```
+
+当前：
+
+```conf
+CONFIG_LLEXT_HEAP_SIZE=64
+```
+
+会在 MCU RAM中静态预留 64 KiB LLEXT heap。它需要容纳所有同时加载插件的代码、只读数据、读写数据、BSS、导出符号和分配管理开销。插件业务线程栈由主固件的 `plugin_thread_stacks` 单独提供，不在这 64 KiB 中。
+
+### 20.5 加载和启动统一插件 API
+
+每个文件加载成功后，管理器执行：
+
+```text
+llext_find_sym("jkcare_plugin")
+  → 检查abi_version
+  → 检查struct_size
+  → plugin->init(&host_api)
+  → plugin->start()
+  → 插件请求创建自己的业务线程
+```
+
+某个插件失败不会阻止目录中后续文件被扫描；函数最终返回第一个错误，并保留已成功启动的插件。当前最多允许：
+
+```c
+#define MAX_PLUGINS        8
+#define MAX_PLUGIN_THREADS 8
+```
+
+超过限制的插件会返回 `-ENOMEM`，后续可以根据 RAM和产品需求调整。
+
+### 20.6 生成主固件专用 LLEXT EDK
+
+独立插件仍必须与主固件使用相同架构、编译 ABI、LLEXT格式和导出符号。先构建主固件：
+
+```powershell
+cd E:\liaoguangwei\code\zephyr_zip\jkcare
+
+west build -p always `
+    -b jkcare_apollo4p_blue `
+    -d build `
+    .
+```
+
+然后生成 Extension Development Kit：
+
+```powershell
+west build -d build -t llext-edk
+```
+
+产物：
+
+```text
+build/zephyr/llext-edk.tar.xz
+```
+
+Windows的 `tar` 若提示无法运行 `xz`，可用 7-Zip分两层解压：
+
+```powershell
+$EdkRoot = "E:\jkcare-plugin-sdk"
+New-Item -ItemType Directory -Force $EdkRoot
+
+& "C:\Program Files\7-Zip\7z.exe" x `
+    .\build\zephyr\llext-edk.tar.xz `
+    "-o$EdkRoot" -y
+
+& "C:\Program Files\7-Zip\7z.exe" x `
+    "$EdkRoot\llext-edk.tar" `
+    "-o$EdkRoot" -y
+```
+
+最终必须存在：
+
+```text
+E:\jkcare-plugin-sdk\llext-edk\cmake.cflags
+```
+
+每次修改以下内容后都应重新生成 EDK并重新编译插件：
+
+- Zephyr版本或工具链；
+- `jkcare_plugin.h`、Host API或ABI版本；
+- 目标SoC、浮点ABI；
+- LLEXT类型和主固件导出符号；
+- 影响插件编译兼容性的 Kconfig。
+
+### 20.7 独立插件 CMake结构
+
+PPG 和 ECG 目录现在各自拥有独立 `CMakeLists.txt`：
+
+```text
+plugins/
+├── cmake/
+│   ├── toolchain.cmake
+│   └── JkcareLlextPlugin.cmake
+├── ppg/
+│   ├── CMakeLists.txt
+│   └── ppg_plugin.c
+└── ecg/
+    ├── CMakeLists.txt
+    └── ecg_plugin.c
+```
+
+插件构建不使用 `west build`，不调用 `find_package(Zephyr)`，也不需要再次指定 `-b jkcare_apollo4p_blue`。目标板和 ABI已经固化在主固件生成的 EDK中。
+
+公共 ABI头文件仍为：
+
+```text
+include/jkcare_plugin.h
+```
+
+如果插件代码移动到另一个仓库或另一台电脑，必须同时发布该头文件，或通过 `JKCARE_PLUGIN_API_DIR` 指向插件 SDK 中的兼容版本。
+
+### 20.8 单独编译 PPG 插件
+
+设置环境变量：
+
+```powershell
+$env:ZEPHYR_SDK_INSTALL_DIR = `
+    "C:\Users\Owner\zephyr-sdk-1.0.1"
+
+$env:LLEXT_EDK_INSTALL_DIR = `
+    "E:\jkcare-plugin-sdk\llext-edk"
+```
+
+配置和编译：
+
+```powershell
+cd E:\liaoguangwei\code\zephyr_zip\jkcare\plugins\ppg
+
+cmake -S . -B build-standalone -G Ninja
+cmake --build build-standalone
+```
+
+产物：
+
+```text
+plugins/ppg/build-standalone/ppg_plugin.llext
+```
+
+修改 `ppg_plugin.c` 后只需：
+
+```powershell
+cmake --build build-standalone
+```
+
+### 20.9 单独编译 ECG 插件
+
+环境变量与 PPG相同：
+
+```powershell
+cd E:\liaoguangwei\code\zephyr_zip\jkcare\plugins\ecg
+
+cmake -S . -B build-standalone -G Ninja
+cmake --build build-standalone
+```
+
+产物：
+
+```text
+plugins/ecg/build-standalone/ecg_plugin.llext
+```
+
+现在不再存在：
+
+```powershell
+west build -d build -t ppg_plugin
+west build -d build -t ecg_plugin
+```
+
+这些曾经是主固件 CMake创建的目标，移除 `add_llext_target()` 后，主固件构建系统不会再识别它们。独立插件统一使用：
+
+```powershell
+cmake -S . -B build-standalone -G Ninja
+cmake --build build-standalone
+```
+
+### 20.10 将插件写入文件系统
+
+独立编译后，需要通过实际产品提供的存储通道将文件复制为：
+
+```text
+/llext/business/ppg_plugin.llext
+/llext/business/ecg_plugin.llext
+```
+
+传输方式可以是 UART、USB、BLE、网络下载、SD卡，或者开发阶段使用 Flash编程工具写入预生成的文件系统镜像。`west flash` 默认只烧录主固件，不会自动把独立 `.llext` 复制到外部文件系统。
+
+正式升级建议增加：
+
+```text
+临时文件写入
+  → 检查文件长度
+  → SHA-256
+  → 数字签名
+  → fs_sync()/关闭文件
+  → 停止旧插件
+  → 原子重命名为正式文件
+  → 加载新插件
+  → 失败时回滚
+```
+
+不要覆盖正在运行插件对应的文件并立即卸载。应先保证插件线程、work、timer和所有回调完全停止，再调用 `llext_unload()`。
+
+### 20.11 使用 PSRAM 作为 LLEXT 运行内存
+
+当前配置：
+
+```conf
+CONFIG_LLEXT_HEAP_SIZE=64
+```
+
+表示链接时在 MCU 内部 RAM 静态预留 64 KiB。若希望运行时将插件区域放进 PSRAM，应改用动态 LLEXT heap：
+
+```conf
+CONFIG_LLEXT=y
+CONFIG_LLEXT_HEAP_DYNAMIC=y
+CONFIG_LLEXT_HEAP_K_HEAP=y
+CONFIG_LLEXT_TYPE_ELF_RELOCATABLE=y
+
+# 动态模式下不再设置：
+# CONFIG_LLEXT_HEAP_SIZE=64
+```
+
+PSRAM 完成初始化和内存映射后，在加载任何插件之前把真实地址范围交给 LLEXT：
+
+```c
+#include <zephyr/llext/llext.h>
+
+static int plugin_heap_init(void)
+{
+    void *psram_base = /* 板级PSRAM可执行映射起始地址 */;
+    size_t psram_size = /* 专门划给LLEXT的字节数 */;
+
+    return llext_heap_init(psram_base, psram_size);
+}
+```
+
+正确启动顺序为：
+
+```text
+初始化PSRAM控制器
+  → 建立CPU可寻址的memory-mapped区域
+  → 配置MPU/cache，保证目标区域允许取指
+  → llext_heap_init(psram_base, psram_size)
+  → 初始化Flash并挂载文件系统到/llext
+  → jkcare_plugin_manager_load_all()
+```
+
+`llext_heap_init()` 指定的是整个 LLEXT 内存池，不是某个插件的固定装载地址。每个插件的 `.text`、`.rodata`、`.data` 和 `.bss` 由 LLEXT 在该池中动态分配。卸载全部插件后，如果要关闭或重新分配 PSRAM，调用：
+
+```c
+jkcare_plugin_manager_stop_all();
+llext_heap_uninit();
+```
+
+使用 PSRAM 时必须同时满足：
+
+- PSRAM 是 CPU 可直接寻址的内存映射区域；仅能通过 SPI 收发函数访问的 PSRAM 不能作为执行 heap。
+- Cortex-M/SoC 的 MPU 与总线必须允许从该区域执行指令（不能是 XN 区域）。
+- 数据缓存和指令缓存必须由平台及 LLEXT 正确维护。
+- 分配给 LLEXT 的区域不能与 framebuffer、通用 heap、DMA buffer 等重叠。
+- 插件运行期间 PSRAM 不能掉电或退出映射模式。
+
+“外部 Flash 文件系统保存插件”和“PSRAM 执行插件”是两件事：前者解决掉电保存与升级，后者提供运行内存。常见组合是：
+
+```text
+SPI NOR/LittleFS长期保存.llext
+  → 启动或按需读取
+  → LLEXT加载到memory-mapped PSRAM
+  → CPU从PSRAM执行插件代码
+```
+
+当前插件线程栈仍由主固件中的 `plugin_thread_stacks` 静态提供，默认位于内部 RAM；把 LLEXT heap 切到 PSRAM并不会自动移动线程栈。
+
+> 注意：PSRAM 起始地址、容量、可执行属性和缓存配置必须以 Apollo4 Plus Blue 的实际芯片手册、BSP 和原理图为准，不能直接照搬示例地址。
+
+### 20.12 从零发布一个插件的操作清单
+
+首次准备插件 SDK：
+
+```powershell
+cd E:\liaoguangwei\code\zephyr_zip\jkcare
+
+west build -p always `
+    -b jkcare_apollo4p_blue `
+    -d build `
+    .
+
+west build -d build -t llext-edk
+```
+
+解压 EDK 并设置 `LLEXT_EDK_INSTALL_DIR` 后，独立编译插件：
+
+```powershell
+cd .\plugins\ppg
+cmake -S . -B build-standalone -G Ninja
+cmake --build build-standalone
+
+cd ..\ecg
+cmake -S . -B build-standalone -G Ninja
+cmake --build build-standalone
+```
+
+发布以下文件，不发布 `.obj`，文件系统加载模式也不需要 `.inc`：
+
+```text
+plugins/ppg/build-standalone/ppg_plugin.llext
+  → /llext/business/ppg_plugin.llext
+
+plugins/ecg/build-standalone/ecg_plugin.llext
+  → /llext/business/ecg_plugin.llext
+```
+
+设备启动前确认文件系统已挂载，随后调用：
+
+```c
+int ret = jkcare_plugin_manager_load_all();
+```
+
+加载成功的关键日志应包含扫描目录以及每个插件的启动信息。若新增插件，只需保持 `jkcare_plugin.h` ABI兼容、独立生成新的 `.llext` 并放入相同目录；主固件不需要提前知道插件业务名称，也不需要增加固定的 `for` 调用。主固件只需要保留通用的目录扫描、ABI校验、Host API和生命周期管理能力。
+
+### 20.13 掉电保存、SD 卡失效与 Flash XIP
+
+设计插件存储时必须区分两个概念：
+
+```text
+掉电保存位置 ≠ 插件运行位置
+```
+
+当前推荐架构是：
+
+```text
+内部Flash/MRAM或板载SPI NOR
+  → 以文件或原始分区永久保存.llext
+  → 每次启动时读取ELF
+  → 加载并重定位到内部RAM或memory-mapped PSRAM
+  → 运行插件
+```
+
+掉电后 RAM/PSRAM 中的运行副本会消失，但非易失存储中的 `.llext` 不会丢失。重新上电后再次调用 `jkcare_plugin_manager_load_all()` 即可恢复插件。因此，为了实现掉电保存，通常不需要让 CPU 直接在 Flash 中执行 LLEXT。
+
+#### 20.13.1 不要把 SD 卡作为关键插件的唯一来源
+
+SD 卡适合作为升级包输入或容量扩展，但可能被拔出、接触不良或出现文件系统损坏。PPG、ECG 等必须可用的业务插件建议保存在：
+
+- MCU 内部 Flash/MRAM 的独立分区；
+- 板载焊接的 SPI NOR Flash；
+- 内部非易失存储上的 LittleFS；
+- 板载 SPI NOR 上的 LittleFS。
+
+推荐的数据流是：
+
+```text
+SD卡/UART/USB/BLE/网络收到升级包
+  → 校验升级包
+  → 写入内部Flash或板载SPI NOR的备用插件槽
+  → 验证写入结果
+  → 切换有效插件版本
+  → 下次启动从非易失插件区加载到RAM/PSRAM
+```
+
+这样 SD 卡不存在或损坏时，系统仍能使用已经安装在板载非易失存储中的插件。
+
+#### 20.13.2 当前文件系统 loader 不是 Flash XIP
+
+当前代码使用：
+
+```c
+LLEXT_FS_LOADER("/llext/business/ppg_plugin.llext")
+```
+
+`LLEXT_FS_LOADER` 的存储类型是 `LLEXT_STORAGE_TEMPORARY`，而且文件系统 loader 不提供可直接引用文件内容的 `peek` 地址。加载时会执行：
+
+```text
+文件系统中的.llext
+  → 读取ELF header和section
+  → 为.text/.rodata/.data/.bss分配运行内存
+  → 复制并进行符号解析和重定位
+  → CPU从RAM/PSRAM中的.text取指
+```
+
+即使 LittleFS 位于 memory-mapped Flash 中，文件路径和文件偏移也不等于稳定的 CPU 可执行地址；文件数据还可能被文件系统分块、搬移或附加元数据。因此，普通文件系统中的 `.llext` 不能自动实现 XIP。
+
+#### 20.13.3 直接从 Flash 运行 LLEXT 的条件
+
+Zephyr 还提供持久缓冲区 loader：
+
+```c
+struct llext_buf_loader loader =
+    LLEXT_PERSISTENT_BUF_LOADER(image_address, image_size);
+```
+
+它表示 ELF 缓冲区在插件整个加载和运行期间始终有效。LLEXT可以尝试直接复用其中满足条件的只读区域，但不保证整个插件都留在 Flash 中执行。直接复用 `.text` 至少需要：
+
+- 插件镜像位于 CPU 可直接寻址的 memory-mapped Flash/MRAM；
+- 该地址区域允许 CPU 取指，不是 XN 区域；
+- `.text` 满足架构、MPU和缓存要求的地址与对齐；
+- `.text` 不需要运行时修改或重定位，或者插件已经提前定位；
+- 镜像地址在插件卸载前保持不变。
+
+以下区域通常仍然需要 RAM：
+
+- `.data`：运行时可读写变量；
+- `.bss`：文件中没有初始数据，需要分配并清零；
+- 包含重定位项、加载时必须修改的 `.text` 或 `.rodata`；
+- LLEXT元数据、插件线程栈和其他运行状态。
+
+当前插件使用：
+
+```conf
+CONFIG_LLEXT_TYPE_ELF_RELOCATABLE=y
+```
+
+可重定位 ELF 的代码通常包含需要 loader 修正的重定位项，而普通 Flash 不能像 RAM一样直接修改，所以当前构建产物通常仍需将代码复制到可写、可执行的 RAM/PSRAM。若要实现真正 XIP，需要额外设计固定 Flash槽位、专用链接脚本、预定位插件、镜像编程流程和自定义加载策略；这会降低插件任意装载和升级的灵活性，不建议作为当前第一阶段方案。
+
+#### 20.13.4 推荐的可靠存储和回退结构
+
+产品中可以采用以下结构：
+
+```text
+主固件
+├── 插件管理器与恢复逻辑
+├── 必要时内置最小可用业务
+└── Host API和ABI校验
+
+内部Flash/MRAM或板载SPI NOR
+├── plugin_a槽
+├── plugin_b槽
+├── manifest/有效版本标记
+└── 可选LittleFS
+
+SD卡
+└── 仅作为插件升级包输入，不作为唯一运行来源
+```
+
+插件升级建议采用：
+
+```text
+写入临时文件或备用槽
+  → 检查文件长度
+  → 校验SHA-256
+  → 验证数字签名
+  → fs_sync()/完成Flash写入
+  → 重新读取并验证
+  → 原子切换有效版本标记
+  → 加载新插件
+  → 失败时回退旧版本或内置版本
+```
+
+最终建议组合为：
+
+```text
+内部Flash/MRAM或板载SPI NOR：掉电保存.llext
+内部RAM或可执行PSRAM：加载后运行插件
+SD卡：只负责导入升级包
+主固件：负责校验、A/B切换、回退和安全卸载
+```
+
+该方案既能保证掉电后插件仍然存在，也能避免 SD 卡损坏导致整个业务系统无法启动，同时保留 LLEXT动态升级和按需加载的能力。

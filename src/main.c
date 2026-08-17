@@ -146,7 +146,8 @@ int main(void)
 	LOG_INF("SHT4x is ready");
 
 	/*
-	 * Discover every plugin image known by the loader, load its ELF,
+	 * The filesystem must already be mounted at /llext. Discover every
+	 * plugin file below /llext/business, load its ELF into the LLEXT RAM heap,
 	 * resolve the common jkcare_plugin symbol, then call init() and start().
 	 * PPG and ECG start their own managed business threads, so main does not
 	 * call a process() function for them.
