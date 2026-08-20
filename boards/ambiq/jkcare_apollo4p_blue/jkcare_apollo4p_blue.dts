@@ -12,12 +12,53 @@
 
 	chosen {
 		zephyr,itcm = &tcm;
-		zephyr,sram = &sram0;
+		/* Keep normal kernel/application data in the 1 MiB SSRAM0 bank. */
+		zephyr,sram = &normal_sram;
 		zephyr,flash = &flash0;
 		zephyr,flash-controller = &flash;
 		zephyr,console = &uart0;
 		zephyr,shell-uart = &uart0;
 	};
+
+	/*
+	 * Apollo4 Plus RAM layout after the 64 KiB ITCM region:
+	 *
+	 *   0x10010000 - 0x1005ffff  CPU TCM / low-latency data RAM (320 KiB)
+	 *   0x10060000 - 0x1015ffff  SSRAM0 / normal system RAM       (1 MiB)
+	 *   0x10160000 - 0x101bffff  Extended SRAM                    (384 KiB)
+	 *   0x101c0000 - 0x102bffff  SSRAM1                           (1 MiB)
+	 *
+	 * The upstream SoC DTS exposes the whole range as one sram0 node.  This
+	 * board splits it into non-overlapping linker regions so objects placed in
+	 * a custom section cannot silently overlap the default Zephyr RAM image.
+	 */
+	fast_ram: fast-memory@10010000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x10010000 0x00050000>;
+		zephyr,memory-region = "FAST_RAM";
+	};
+
+	normal_sram: memory@10060000 {
+		compatible = "mmio-sram";
+		reg = <0x10060000 0x00100000>;
+	};
+
+	extended_ram: memory@10160000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x10160000 0x00060000>;
+		zephyr,memory-region = "EXTENDED_RAM";
+	};
+
+	ssram1: memory@101c0000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x101c0000 0x00100000>;
+		zephyr,memory-region = "SSRAM1";
+	};
+};
+
+/* The combined upstream node is replaced by the non-overlapping nodes above. */
+&sram0 {
+	status = "disabled";
 };
 
 /* UART0 is the console and logging output. */

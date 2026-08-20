@@ -1929,3 +1929,448 @@ SD卡：只负责导入升级包
 ```
 
 该方案既能保证掉电后插件仍然存在，也能避免 SD 卡损坏导致整个业务系统无法启动，同时保留 LLEXT动态升级和按需加载的能力。
+
+## 21. Apollo4 Plus 自定义 RAM节区
+
+### 21.1 为什么需要自定义节区
+
+默认情况下，Zephyr把普通全局变量、`.data`、`.bss`、线程栈和内核对象统一放进 `chosen` 的 `zephyr,sram`。Apollo4 Plus内部存在多种性能、功耗和共享属性不同的 RAM，因此本工程将它们拆分，允许应用显式选择：
+
+- 低延迟 CPU TCM；
+- 普通系统内存 SSRAM0；
+- Extended SRAM；
+- 第二组共享内存 SSRAM1。
+
+物理布局依据 Ambiq HAL和 [Apollo4 Family Programmer's Guide](https://ambiq.com/wp-content/uploads/2022/10/Apollo4-Family-Programmers-Guide.pdf)：
+
+| 用途 | 地址范围 | 容量 | C宏 |
+|---|---:|---:|---|
+| ITCM代码区 | `0x10000000–0x1000FFFF` | 64 KiB | Zephyr现有 ITCM机制 |
+| 高速 CPU TCM数据区 | `0x10010000–0x1005FFFF` | 320 KiB | `JKCARE_FAST_RAM` |
+| 普通 SSRAM0 | `0x10060000–0x1015FFFF` | 1 MiB | `JKCARE_NORMAL_RAM`、`JKCARE_SSRAM0` |
+| Extended SRAM | `0x10160000–0x101BFFFF` | 384 KiB | `JKCARE_EXTENDED_RAM` |
+| SSRAM1 | `0x101C0000–0x102BFFFF` | 1 MiB | `JKCARE_SSRAM1` |
+
+Ambiq官方资料将物理存储体称为 TCM、SSRAM0、Extended SRAM和SSRAM1，并未把它们命名为“AHPB0/AHPB1”。工程按真实存储体命名，避免逻辑名称与硬件映射不一致。
+
+### 21.2 三层映射关系
+
+自定义 RAM不是只写一个 C属性，而是三层共同完成：
+
+```text
+C变量的input section
+  → LD定义的output section
+  → DeviceTree生成的MEMORY物理区域
+```
+
+以高速 RAM为例：
+
+```c
+JKCARE_FAST_RAM
+static uint8_t ppg_buffer[4096];
+```
+
+宏把变量放入 input section：
+
+```c
+__attribute__((section(".jkcare_fast_ram"), aligned(32), used))
+```
+
+链接脚本收集它并指定目标 MEMORY区域：
+
+```ld
+SECTION_PROLOGUE(.jkcare_fast_ram, (NOLOAD), SUBALIGN(32))
+{
+    __jkcare_fast_ram_start = .;
+    KEEP(*(.jkcare_fast_ram))
+    KEEP(*(.jkcare_fast_ram.*))
+    __jkcare_fast_ram_end = .;
+} GROUP_NOLOAD_LINK_IN(FAST_RAM, FAST_RAM)
+```
+
+DeviceTree定义 `FAST_RAM` 的真实地址和容量。最终关系为：
+
+```text
+ppg_buffer
+  → .jkcare_fast_ram
+  → FAST_RAM
+  → 0x10010000–0x1005FFFF
+```
+
+### 21.3 DeviceTree物理内存定义
+
+板级内存定义位于：
+
+```text
+boards/ambiq/jkcare_apollo4p_blue/jkcare_apollo4p_blue.dts
+```
+
+普通 RAM节点：
+
+```dts
+normal_sram: memory@10060000 {
+    compatible = "mmio-sram";
+    reg = <0x10060000 0x00100000>;
+};
+```
+
+并通过 `chosen` 成为 Zephyr默认 RAM：
+
+```dts
+chosen {
+    zephyr,sram = &normal_sram;
+};
+```
+
+Zephyr据此生成：
+
+```ld
+MEMORY
+{
+    RAM (wx) :
+        ORIGIN = 0x10060000,
+        LENGTH = 0x00100000
+}
+```
+
+高速 RAM等额外区域使用：
+
+```dts
+fast_ram: fast-memory@10010000 {
+    compatible = "zephyr,memory-region", "mmio-sram";
+    reg = <0x10010000 0x00050000>;
+    zephyr,memory-region = "FAST_RAM";
+};
+```
+
+从而生成：
+
+```ld
+FAST_RAM (rw) :
+    ORIGIN = 0x10010000,
+    LENGTH = 0x00050000
+```
+
+地址只在 DTS中维护，LD通过区域名称引用。这样可以避免 DTS和 LD各写一份地址后发生不一致，也便于更换开发板时调整物理映射。
+
+### 21.4 `mmio-sram` 与 `zephyr,memory-region`
+
+两者作用不同：
+
+```dts
+compatible = "mmio-sram";
+```
+
+表示该节点是一块 CPU可直接寻址的 SRAM。若节点被 `chosen/zephyr,sram`选为默认内存，Zephyr会自动生成 `RAM`，链接脚本通过 `RAMABLE_REGION`使用它。
+
+```dts
+compatible = "zephyr,memory-region", "mmio-sram";
+```
+
+除了说明它是 SRAM，还要求 Zephyr为它生成一个独立、可命名的链接器 MEMORY区域。此时还必须提供：
+
+```dts
+zephyr,memory-region = "FAST_RAM";
+```
+
+完整含义为：
+
+```text
+compatible = "zephyr,memory-region"
+  → 生成独立链接器区域
+
+compatible中的"mmio-sram"
+  → 物理类型为直接寻址SRAM
+
+zephyr,memory-region = "FAST_RAM"
+  → 链接器区域名称
+
+reg = <起始地址 长度>
+  → 链接器区域地址和容量
+```
+
+默认 `normal_sram` 没有增加 `zephyr,memory-region`，因为它已经生成默认 `RAM`。如果再为同一地址生成 `SSRAM0`，可能形成两个相互重叠的 MEMORY区域，分别向其中放置对象时存在覆盖风险。
+
+### 21.5 MEMORY区域名称能否自定义
+
+下面的 compatible 是 Zephyr固定 binding名称，不能随意修改：
+
+```dts
+compatible = "zephyr,memory-region";
+```
+
+下面的属性值是项目自定义的链接区域名：
+
+```dts
+zephyr,memory-region = "FAST_RAM";
+```
+
+它可以改为：
+
+```dts
+zephyr,memory-region = "JKCARE_LOW_LATENCY_RAM";
+```
+
+但必须同时把 LD中的名称改为：
+
+```ld
+GROUP_NOLOAD_LINK_IN(
+    JKCARE_LOW_LATENCY_RAM,
+    JKCARE_LOW_LATENCY_RAM
+)
+```
+
+命名要求：
+
+- 每个 `zephyr,memory-region`值在整个 DTS中必须唯一；
+- 推荐只使用大写字母、数字和下划线；
+- 推荐格式为 `^[A-Z_][A-Z0-9_]*$`；
+- 不建议使用空格、中文、连字符、`@`或以数字开头；
+- 修改 DTS名称后必须同步修改 LD引用。
+
+下面三个名称彼此独立：
+
+```dts
+fast_ram: fast-memory@10010000 {
+    zephyr,memory-region = "FAST_RAM";
+};
+```
+
+| 内容 | 示例 | 用途 |
+|---|---|---|
+| 节点标签 | `fast_ram` | DTS中通过 `&fast_ram`引用 |
+| 节点名 | `fast-memory@10010000` | 描述设备节点和单元地址 |
+| MEMORY区域名 | `FAST_RAM` | LD中使用 |
+
+### 21.6 为什么使用两个 LD文件
+
+当前文件：
+
+```text
+linker/jkcare-normal-ram.ld
+linker/jkcare-memory-regions.ld
+```
+
+它们不是因为一个文件写不下，而是需要插入 Zephyr主链接脚本的不同位置。
+
+普通 SRAM0属于默认 `RAMABLE_REGION`，通过：
+
+```cmake
+zephyr_linker_sources(
+    RAM_SECTIONS
+    linker/jkcare-normal-ram.ld
+)
+```
+
+放在 Zephyr默认 RAM布局内部，使其参与 `_image_ram_start`、`_image_ram_end`、MPU覆盖范围和 RAM统计。
+
+其他三个区域是独立的 MEMORY区域，通过：
+
+```cmake
+zephyr_linker_sources(
+    SECTIONS
+    linker/jkcare-memory-regions.ld
+)
+```
+
+分别放入：
+
+```text
+FAST_RAM
+EXTENDED_RAM
+SSRAM1
+```
+
+同一个 linker snippet文件不能同时注册到 `RAM_SECTIONS`和 `SECTIONS`；相同文件多次注册时只保留最后一个插入位置。把默认 RAM section强行放在 `SECTIONS`虽然可能链接成功，但会脱离 Zephyr推荐的默认 RAM布局，可能影响内存边界、MPU和统计，因此保持两个入口文件更安全。
+
+### 21.7 C宏使用方法
+
+头文件：
+
+```text
+include/jkcare_memory_sections.h
+```
+
+使用示例：
+
+```c
+#include <string.h>
+
+#include "jkcare_memory_sections.h"
+
+JKCARE_FAST_RAM
+static uint8_t ppg_filter_buffer[16 * 1024];
+
+JKCARE_NORMAL_RAM
+static uint8_t application_buffer[32 * 1024];
+
+JKCARE_EXTENDED_RAM
+static uint8_t display_work_buffer[64 * 1024];
+
+JKCARE_SSRAM1
+static uint8_t frame_buffer[256 * 1024];
+```
+
+`JKCARE_SSRAM0` 是 `JKCARE_NORMAL_RAM` 的别名：
+
+```c
+#define JKCARE_SSRAM0 JKCARE_NORMAL_RAM
+```
+
+所有 section使用 32字节对齐，以便后续处理 Cache line、DMA或硬件对齐要求。具体外设仍可能要求更大的地址或长度对齐，需要以对应驱动和硬件手册为准。
+
+### 21.8 `NOLOAD` 与初始化
+
+当前自定义 section全部定义为：
+
+```ld
+(NOLOAD)
+```
+
+含义是：
+
+- 固件镜像不保存这部分初始内容；
+- 启动时不从 MRAM复制初始值；
+- Zephyr不会自动清零；
+- 可以避免启动早期访问尚未完成电源配置的 RAM bank。
+
+因此使用前必须显式初始化：
+
+```c
+memset(ppg_filter_buffer, 0, sizeof(ppg_filter_buffer));
+memset(frame_buffer, 0, sizeof(frame_buffer));
+```
+
+`NOLOAD` 不等于掉电保持。软件复位、睡眠和深睡期间是否保留内容，取决于 Apollo4的 RAM供电与 retention配置；掉电后这些 RAM内容都会消失。
+
+在访问 Extended SRAM或 SSRAM1前还应确认：
+
+- 对应 RAM bank已经上电；
+- 深睡保持策略符合业务要求；
+- MPU允许访问；
+- Cache属性和 DMA一致性配置正确；
+- 区域没有同时分配给 DSP、显示、GPU或其他子系统。
+
+### 21.9 section边界符号与 `extern`
+
+LD为每个 section定义边界：
+
+```ld
+__jkcare_fast_ram_start = .;
+__jkcare_fast_ram_end = .;
+```
+
+头文件通过数组形式把链接器符号暴露给 C：
+
+```c
+extern uint8_t __jkcare_fast_ram_start[];
+extern uint8_t __jkcare_fast_ram_end[];
+```
+
+这些不是普通数组，也不会分配额外 RAM；真正定义来自 LD。数组形式用于表达“这是一个地址”，避免把链接器符号误当成存储在该地址中的整数变量。
+
+计算 section实际使用量：
+
+```c
+size_t used = JKCARE_SECTION_SIZE(
+    __jkcare_fast_ram_start,
+    __jkcare_fast_ram_end
+);
+```
+
+整体清零：
+
+```c
+memset(
+    __jkcare_fast_ram_start,
+    0,
+    JKCARE_SECTION_SIZE(
+        __jkcare_fast_ram_start,
+        __jkcare_fast_ram_end
+    )
+);
+```
+
+也可以用于：
+
+- 输出内存统计；
+- 检查 DMA buffer是否位于指定 RAM；
+- 配置 Cache或 MPU；
+- 将预留区域交给自定义 heap；
+- 将区域交给 `llext_heap_init()`。
+
+如果应用只使用 `JKCARE_FAST_RAM`放置变量，从不查询边界，`extern`声明并不是 section正确放置的必要条件；保留它们没有运行成本，并方便后续统一初始化和内存管理。
+
+### 21.10 给 LLEXT预留 RAM
+
+例如在 SSRAM1预留 512 KiB：
+
+```c
+JKCARE_SSRAM1
+static uint8_t llext_memory[512 * 1024];
+```
+
+配置动态 LLEXT heap：
+
+```conf
+CONFIG_LLEXT=y
+CONFIG_LLEXT_HEAP_DYNAMIC=y
+CONFIG_LLEXT_HEAP_K_HEAP=y
+```
+
+对应 RAM bank上电并初始化后调用：
+
+```c
+int ret = llext_heap_init(
+    llext_memory,
+    sizeof(llext_memory)
+);
+```
+
+不要同时把整个 `__jkcare_ssram1_start/end`和其中某个数组分别交给两个内存分配器，否则会形成重叠管理。一个物理范围只能由一个明确的 owner负责分配。
+
+### 21.11 编译和验证
+
+重新编译：
+
+```powershell
+west build -p always `
+    -b jkcare_apollo4p_blue `
+    -d build `
+    .
+```
+
+查看生成的 MEMORY区域：
+
+```powershell
+Select-String `
+    .\build\zephyr\linker.cmd `
+    -Pattern "FAST_RAM|EXTENDED_RAM|SSRAM1|RAM \("
+```
+
+查看 section：
+
+```powershell
+arm-zephyr-eabi-objdump -h `
+    .\build\zephyr\zephyr.elf |
+    Select-String "jkcare_"
+```
+
+查看变量地址：
+
+```powershell
+arm-zephyr-eabi-nm -n `
+    .\build\zephyr\zephyr.elf |
+    Select-String "ppg_filter_buffer|frame_buffer"
+```
+
+判断标准：
+
+```text
+JKCARE_FAST_RAM     → 0x10010000–0x1005FFFF
+JKCARE_NORMAL_RAM   → 0x10060000–0x1015FFFF
+JKCARE_EXTENDED_RAM → 0x10160000–0x101BFFFF
+JKCARE_SSRAM1       → 0x101C0000–0x102BFFFF
+```
+
+链接器会检查每个独立 MEMORY区域是否溢出，但不会替应用确认 RAM bank电源状态、Cache属性和跨处理器所有权，这些仍属于板级初始化和运行时管理职责。

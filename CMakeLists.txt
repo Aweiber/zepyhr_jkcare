@@ -10,6 +10,16 @@ project(jkcare)
 
 zephyr_include_directories(include)
 
+# Default SSRAM0 section and the dedicated Apollo4 Plus physical RAM banks.
+zephyr_linker_sources(
+    RAM_SECTIONS
+    linker/jkcare-normal-ram.ld
+)
+zephyr_linker_sources(
+    SECTIONS
+    linker/jkcare-memory-regions.ld
+)
+
 target_sources(app PRIVATE
     src/main.c
     src/plugin_manager.c
