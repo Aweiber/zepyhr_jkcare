@@ -24,5 +24,3 @@ target_sources(app PRIVATE
     src/main.c
     src/plugin_manager.c
 )
-
-add_subdirectory(drivers/sensor/cht8305c)

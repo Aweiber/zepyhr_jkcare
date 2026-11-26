@@ -1,5 +1,28 @@
 {
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
-    "C_Cpp.default.compilerPath": "C:/Users/Owner/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc.exe",
-    "C_Cpp.loggingLevel": "Warning"
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "cmake.configureOnOpen": false,
+    "cmake.buildDirectory": "${workspaceFolder}/zepyhr_jkcare/build",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/zepyhr_jkcare/build/compile_commands.json",
+    "C_Cpp.default.compilerPath": "${workspaceFolder}/tools/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc.exe",
+    "terminal.integrated.profiles.windows": {
+        "JKCare PowerShell": {
+            "source": "PowerShell",
+            "args": [
+                "-NoProfile",
+                "-NoExit",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ". \"${workspaceFolder}/env.ps1\""
+            ]
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "JKCare PowerShell",
+    "files.watcherExclude": {
+        "**/zephyr-4.4.0/**": true,
+        "**/modules/**": true,
+        "**/.venv/**": true,
+        "**/tools/**": true,
+        "**/.downloads/**": true
+    }
 }

@@ -1,0 +1,178 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "JKCare: build",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; west build -b jkcare_apollo4p_blue -d \"${workspaceFolder}/zepyhr_jkcare/build\" \"${workspaceFolder}/zepyhr_jkcare\" -- -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "JKCare: flash (writes connected board)",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; west flash -d \"${workspaceFolder}/zepyhr_jkcare/build\"; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "JKCare: plugins",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; foreach ($plugin in @(\"ppg\", \"ecg\")) { cmake -S \"${workspaceFolder}/zepyhr_jkcare/plugins/$plugin\" -B \"${workspaceFolder}/zepyhr_jkcare/plugins/$plugin/build-standalone\" -G Ninja; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cmake --build \"${workspaceFolder}/zepyhr_jkcare/plugins/$plugin/build-standalone\"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; exit 0",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "JKCare: regenerate LLEXT EDK",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; west build -d \"${workspaceFolder}/zepyhr_jkcare/build\" -t llext-edk; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & \"C:/Program Files/7-Zip/7z.exe\" x \"${workspaceFolder}/zepyhr_jkcare/build/zephyr/llext-edk.tar.xz\" \"-o${workspaceFolder}/tools/jkcare-plugin-sdk\" -y -bso0 -bsp0; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & \"C:/Program Files/7-Zip/7z.exe\" x \"${workspaceFolder}/tools/jkcare-plugin-sdk/llext-edk.tar\" \"-o${workspaceFolder}/tools/jkcare-plugin-sdk\" -y -bso0 -bsp0; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "JKCare: configure PPG",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; cmake -S \"${workspaceFolder}/zepyhr_jkcare/plugins/ppg\" -B \"${workspaceFolder}/zepyhr_jkcare/plugins/ppg/build-standalone\" -G Ninja; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "dependsOn": "JKCare: regenerate LLEXT EDK",
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "JKCare: build PPG",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; cmake --build \"${workspaceFolder}/zepyhr_jkcare/plugins/ppg/build-standalone\"; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "JKCare: configure ECG",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; cmake -S \"${workspaceFolder}/zepyhr_jkcare/plugins/ecg\" -B \"${workspaceFolder}/zepyhr_jkcare/plugins/ecg/build-standalone\" -G Ninja; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "dependsOn": "JKCare: regenerate LLEXT EDK",
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "JKCare: build ECG",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; cmake --build \"${workspaceFolder}/zepyhr_jkcare/plugins/ecg/build-standalone\"; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "jkcare-llext-edk",
+            "type": "shell",
+            "command": ". \"${workspaceFolder}/env.ps1\"; west build -d \"${workspaceFolder}/zepyhr_jkcare/build\" -t llext-edk; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & \"C:/Program Files/7-Zip/7z.exe\" x \"${workspaceFolder}/zepyhr_jkcare/build/zephyr/llext-edk.tar.xz\" \"-o${workspaceFolder}/tools/jkcare-plugin-sdk\" -y -bso0 -bsp0; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & \"C:/Program Files/7-Zip/7z.exe\" x \"${workspaceFolder}/tools/jkcare-plugin-sdk/llext-edk.tar\" \"-o${workspaceFolder}/tools/jkcare-plugin-sdk\" -y -bso0 -bsp0; exit $LASTEXITCODE",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": [
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command"
+                    ]
+                }
+            },
+            "problemMatcher": []
+        }
+    ]
+}

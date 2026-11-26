@@ -15,4 +15,4 @@ manifest:
       import: true
 
   self:
-    path: jkcare
+    path: .

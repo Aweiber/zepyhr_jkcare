@@ -6,15 +6,17 @@
             "type": "cortex-debug",
             "request": "launch",
             "servertype": "jlink",
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "cwd": "${workspaceFolder}/zepyhr_jkcare",
+            "executable": "${workspaceFolder}/zepyhr_jkcare/build/zephyr/zephyr.elf",
             "device": "AMAP42KK-KBR",
             "interface": "swd",
             "serverArgs": [
                 "-speed",
                 "1000"
             ],
-            "armToolchainPath": "E:/tools/gcc-arm-none-eabi-10.3-2021.10/bin",
+            "armToolchainPath": "${workspaceFolder}/tools/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin",
+            "gdbPath": "${workspaceFolder}/tools/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V976/JLinkGDBServerCL.exe",
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none"
         }

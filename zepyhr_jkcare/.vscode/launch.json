@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "JKCare Apollo4 J-Link",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "jlink",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "device": "AMAP42KK-KBR",
+            "interface": "swd",
+            "serverArgs": [
+                "-speed",
+                "1000"
+            ],
+            "armToolchainPath": "${workspaceFolder}/../tools/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V976/JLinkGDBServerCL.exe"
+        }
+    ]
+}

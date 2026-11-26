@@ -1,0 +1,7 @@
+{
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.default.compilerPath": "${workspaceFolder}/../tools/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc.exe",
+    "C_Cpp.loggingLevel": "Warning",
+    "python.defaultInterpreterPath": "${workspaceFolder}/../.venv/Scripts/python.exe",
+    "cmake.configureOnOpen": false
+}
